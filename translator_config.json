@@ -1,10 +1,11 @@
 {
     "file_path": "/Users/emrekucukkaya/Downloads/Narcissism-for-Dummies.epub.mobi",
-    "source": "google_free",
+    "source": "local",
+    "source_lang": "en",
     "language": "tr",
     "deepl_key": "",
     "gemini_key": "",
-    "test_mode": true,
+    "test_mode": false,
     "test_limit": 30,
     "start_index": 0
 }

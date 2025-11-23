@@ -97,7 +97,7 @@ source venv/bin/activate
 echo -e "${YELLOW}Installing/Updating Python libraries...${NC}"
 pip install --upgrade pip
 # Installing the specific libraries your backend needs
-pip install beautifulsoup4 lxml deepl google-generativeai deep-translator
+pip install beautifulsoup4 lxml deepl google-generativeai deep-translator flask argostranslate gunicorn numpy==1.26.4
 
 # ---------------------------------------------------------
 # 6. Run the App

@@ -1,11 +1,19 @@
+import os
+import sys
+
+# --- CRITICAL STABILITY FIXES ---
+# Must be set BEFORE importing anything else that uses CTranslate2/NumPy
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+os.environ['CT2_VERBOSE'] = '1'
+
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import threading
 import queue
 import json
-import os
 
-# Import the backend class we just created
+# Import the backend class
 from translator_backend import BackendTranslator
 
 CONFIG_FILE = "translator_config.json"
@@ -23,15 +31,25 @@ def load_settings():
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("eBook Translator GUI 💬📘")
-        self.geometry("600x650") 
+        self.title("eBook Translator GUI (Local) 💬📘")
+        self.geometry("600x650") # Reduced height as we removed URL fields
         self.resizable(False, False)
         
         self.settings = load_settings()
-        self.queue = queue.Queue() # The bridge between Thread and GUI
-        self.translator = None     # Store the backend instance so we can stop it
+        self.queue = queue.Queue()
+        self.translator = None
         
         self.create_widgets()
+        
+        # Simple cleanup on close
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def on_closing(self):
+        print("Shutting down...")
+        if self.translator:
+            self.translator.stop_requested = True
+        self.destroy()
+        sys.exit(0)
 
     def create_widgets(self):
         # --- INPUTS ---
@@ -42,22 +60,37 @@ class App(tk.Tk):
         tk.Entry(frame_file, textvariable=self.file_path_var, width=50).pack(side="left")
         tk.Button(frame_file, text="Browse", command=self.pick_file).pack(side="left", padx=5)
 
-        tk.Label(self, text="Translation Source:", font=("Arial", 12)).pack(anchor="w", padx=10, pady=10)
-        self.source_var = tk.StringVar(value=self.settings.get("source", "google_free"))
-        ttk.Combobox(self, textvariable=self.source_var, values=["google_free", "deepl", "gemini"], state="readonly", width=20).pack(anchor="w", padx=10)
+        # --- TRANSLATION SETTINGS ---
+        tk.Label(self, text="Translation Source:", font=("Arial", 12)).pack(anchor="w", padx=10, pady=(15, 0))
+        self.source_var = tk.StringVar(value=self.settings.get("source", "local"))
+        
+        # Removed "Local API URL" logic, merged into dropdown
+        source_cb = ttk.Combobox(self, textvariable=self.source_var, 
+                               values=["local", "google_free", "deepl", "gemini"], 
+                               state="readonly", width=20)
+        source_cb.pack(anchor="w", padx=10)
+        source_cb.bind("<<ComboboxSelected>>", self.toggle_fields)
 
-        tk.Label(self, text="Target Language:", font=("Arial", 12)).pack(anchor="w", padx=10, pady=(15, 0))
+        # Frame for Languages
+        frame_lang = tk.Frame(self)
+        frame_lang.pack(fill="x", padx=10, pady=5)
+        
+        tk.Label(frame_lang, text="From (Code):").pack(side="left")
+        self.source_lang_var = tk.StringVar(value=self.settings.get("source_lang", "en"))
+        tk.Entry(frame_lang, textvariable=self.source_lang_var, width=5).pack(side="left", padx=(5, 15))
+
+        tk.Label(frame_lang, text="To (Code):").pack(side="left")
         self.lang_var = tk.StringVar(value=self.settings.get("language", "tr"))
-        tk.Entry(self, textvariable=self.lang_var, width=15).pack(anchor="w", padx=10)
+        tk.Entry(frame_lang, textvariable=self.lang_var, width=5).pack(side="left", padx=5)
 
-        # --- KEYS ---
-        tk.Label(self, text="DeepL API Key:", font=("Arial", 12)).pack(anchor="w", padx=10, pady=(15, 0))
+        # --- API KEYS ---
+        self.lbl_deepl = tk.Label(self, text="DeepL API Key:", font=("Arial", 10))
         self.deepl_var = tk.StringVar(value=self.settings.get("deepl_key", ""))
-        tk.Entry(self, textvariable=self.deepl_var, width=40, show="•").pack(anchor="w", padx=10)
+        self.entry_deepl = tk.Entry(self, textvariable=self.deepl_var, width=40, show="•")
 
-        tk.Label(self, text="Gemini API Key:", font=("Arial", 12)).pack(anchor="w", padx=10, pady=(15, 0))
+        self.lbl_gemini = tk.Label(self, text="Gemini API Key:", font=("Arial", 10))
         self.gemini_var = tk.StringVar(value=self.settings.get("gemini_key", ""))
-        tk.Entry(self, textvariable=self.gemini_var, width=40, show="•").pack(anchor="w", padx=10)
+        self.entry_gemini = tk.Entry(self, textvariable=self.gemini_var, width=40, show="•")
 
         # --- SETTINGS ROW ---
         frame_opts = tk.Frame(self)
@@ -91,6 +124,21 @@ class App(tk.Tk):
 
         self.btn_stop = tk.Button(frame_btns, text="Terminate 🛑", font=("Arial", 14), bg="#f44336", fg="white", state="disabled", command=self.stop_translation)
         self.btn_stop.pack(side="left", padx=10)
+        
+        self.toggle_fields()
+
+    def toggle_fields(self, event=None):
+        mode = self.source_var.get()
+        # Hide optional fields
+        for w in [self.lbl_deepl, self.entry_deepl, self.lbl_gemini, self.entry_gemini]:
+            w.pack_forget()
+            
+        if mode == "deepl":
+            self.lbl_deepl.pack(anchor="w", padx=10)
+            self.entry_deepl.pack(anchor="w", padx=10)
+        elif mode == "gemini":
+            self.lbl_gemini.pack(anchor="w", padx=10)
+            self.entry_gemini.pack(anchor="w", padx=10)
 
     def pick_file(self):
         filepath = filedialog.askopenfilename(filetypes=[("eBook Files", "*.epub *.mobi *.azw3")])
@@ -101,11 +149,12 @@ class App(tk.Tk):
             messagebox.showerror("Error", "Please select a file.")
             return
 
-        # 1. Gather Settings
         current_settings = {
             "file_path": self.file_path_var.get(),
             "source": self.source_var.get(),
+            "source_lang": self.source_lang_var.get(),
             "language": self.lang_var.get(),
+            # No URL needed anymore
             "deepl_key": self.deepl_var.get(),
             "gemini_key": self.gemini_var.get(),
             "test_mode": self.test_mode_var.get(),
@@ -114,48 +163,44 @@ class App(tk.Tk):
         }
         save_settings(current_settings)
 
-        # 2. Reset UI
         self.btn_run.config(state="disabled", text="Running...")
-        self.btn_stop.config(state="normal") # Enable Terminate Button
+        self.btn_stop.config(state="normal")
         self.progress['value'] = 0
         
-        # 3. Create Translator Instance Here (so we can stop it later)
+        # Instantiate backend
         self.translator = BackendTranslator(update_callback=self.queue_update)
         
-        # 4. Start Background Thread
+        # Run everything in one thread (Backend handles setup + translation)
         t = threading.Thread(target=self.translator.run_translation, args=(current_settings,))
         t.daemon = True
         t.start()
         
-        # 5. Start listening for updates
         self.check_queue()
 
     def stop_translation(self):
-        """Signals the backend to stop"""
         if self.translator:
             self.translator.stop_requested = True
-            self.status_label.config(text="Stopping... Waiting for running threads to finish.")
-            self.btn_stop.config(state="disabled") # Prevent double clicking
+            self.status_label.config(text="Stopping...")
+            self.btn_stop.config(state="disabled")
 
     def queue_update(self, percent, message):
-        # Pass data from background thread to Main Thread via Queue
         self.queue.put((percent, message))
 
     def check_queue(self):
-        """Updates UI based on queue messages"""
         try:
             while True:
                 percent, msg = self.queue.get_nowait()
                 self.progress['value'] = percent
                 self.status_label.config(text=msg)
                 
-                # Check for completion, error, or stop
                 if "Done!" in msg or "Error" in msg or "Stopped" in msg:
                     self.btn_run.config(state="normal", text="Run Translation 🚀")
                     self.btn_stop.config(state="disabled")
                     
                     if "Stopped" in msg:
-                        messagebox.showwarning("Terminated", "Translation stopped by user. File saved partially.")
+                        messagebox.showwarning("Terminated", "Process stopped.")
+                    elif "Error" in msg:
+                        messagebox.showerror("Error", msg)
                     else:
                         messagebox.showinfo("Result", msg)
                     return 
@@ -163,7 +208,7 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         
-        self.after(100, self.check_queue) # Check again in 100ms
+        self.after(100, self.check_queue)
 
 if __name__ == "__main__":
     app = App()
